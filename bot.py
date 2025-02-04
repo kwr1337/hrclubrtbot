@@ -32,9 +32,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 from telethon import TelegramClient
 
-# -------------------------------------------------------
-# НАСТРОЙКИ
-# -------------------------------------------------------
+
 BOT_TOKEN = "1282162158:AAHDrDTUAvDecZ-UehaoFdG6MkHxaKH1wvQ"
 ROOT_ADMIN_ID = 608167496  # главный админ
 PRIVATE_GROUP_ID = -1002306345871
