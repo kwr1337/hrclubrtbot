@@ -4,6 +4,7 @@ import os
 import re
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
@@ -91,12 +92,26 @@ class UserRequest(Base):
     status = Column(String, default="pending")
     rejection_reason = Column(String, nullable=True)
     confirmation_code = Column(String, nullable=True)
+    created_at = Column(String, nullable=True)  # Дата создания
+    approved_at = Column(String, nullable=True)  # Дата одобрения
+    rejected_at = Column(String, nullable=True)  # Дата отклонения
+    rules_accepted_at = Column(String, nullable=True)  # Дата принятия правил
 
     approved_by = Column(Integer, nullable=True)
     rejected_by = Column(Integer, nullable=True)
 
 
-Base.metadata.create_all(engine)
+# Base.metadata.drop_all(engine)
+# Base.metadata.create_all(engine)
+
+# Добавляем root админа
+with get_db() as db:
+    root_admin = db.query(AdminUser).filter_by(telegram_id=ROOT_ADMIN_ID).first()
+    if not root_admin:
+        new_root = AdminUser(telegram_id=ROOT_ADMIN_ID, full_name="Root Admin")
+        db.add(new_root)
+        db.commit()
+        logging.info(f"Added root admin with ID {ROOT_ADMIN_ID}")
 
 
 # -------------------------------------------------------
@@ -449,6 +464,7 @@ async def main():
     async def confirm_request(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
         try:
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with get_db() as db:
                 new_req = UserRequest(
                     chat_id=callback.from_user.id,
@@ -459,14 +475,20 @@ async def main():
                     position=data.get("position"),  # <--- теперь добавляем при сохранении
                     username=data.get("username"),
                     status="pending",
+                    created_at=current_time
                 )
                 db.add(new_req)
                 db.commit()
 
-                # Уведомление админов о новой заявке
+                # Уведомление админов с кнопками
                 admins = db.query(AdminUser).all()
                 for admin in admins:
                     try:
+                        kb = InlineKeyboardBuilder()
+                        kb.button(text="✅ Одобрить", callback_data=f"approve_{new_req.id}")
+                        kb.button(text="❌ Отклонить", callback_data=f"reject_{new_req.id}")
+                        kb.adjust(2)
+                        
                         await callback.message.bot.send_message(
                             chat_id=admin.telegram_id,
                             text=(
@@ -476,9 +498,11 @@ async def main():
                                 f"📞 <b>Телефон:</b> <code>{new_req.phone}</code>\n"
                                 f"🏢 <b>Место работы:</b> {new_req.workplace}\n"
                                 f"💼 <b>Должность:</b> {new_req.position}\n"
-                                f"👥 <b>Username:</b> {new_req.username if new_req.username else '—'}\n\n"
+                                f"👥 <b>Username:</b> {new_req.username if new_req.username else '—'}\n"
+                                f"📅 <b>Дата создания:</b> {current_time}\n\n"
                                 "⚠️ <i>Не забудьте проверить заявку!</i>"
                             ),
+                            reply_markup=kb.as_markup(),
                             parse_mode="HTML"
                         )
                     except Exception as e:
@@ -815,7 +839,8 @@ async def main():
             await message.answer("У вас нет прав.")
             return
         with get_db() as db:
-            pendings = db.query(UserRequest).filter_by(status="pending").all()
+            # Получаем заявки в обратном порядке
+            pendings = db.query(UserRequest).filter_by(status="pending").order_by(UserRequest.id.desc()).all()
             if not pendings:
                 await message.answer("Нет заявок со статусом 'pending'.")
                 return
@@ -854,13 +879,15 @@ async def main():
             f"📞 <b>Телефон:</b> <code>{req.phone}</code>\n"
             f"🏢 <b>Место работы:</b> {req.workplace}\n"
             f"💼 <b>Должность:</b> {req.position}\n"
+            f"👥 <b>Username:</b> {req.username if req.username else '—'}\n"
+            f"📅 <b>Дата создания:</b> {req.created_at}\n"
             f"Статус: {req.status}"
         )
 
         if edit:
-            await message.edit_text(text, reply_markup=kb.as_markup())
+            await message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         else:
-            await message.answer(text, reply_markup=kb.as_markup())
+            await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
     @dp.callback_query(F.data == "next_request")
     async def next_request_cb(callback: CallbackQuery, state: FSMContext):
@@ -922,17 +949,20 @@ async def main():
         text = (
             f"✅ <b>Принятая заявка</b> #{req.id}\n\n"
             f"📝 <b>Тип:</b> {'С (свои)' if req.person_type=='self' else 'ТП (третье лицо)'}\n"
-            f"👤 <b>ФИО:</b>{req.full_name}\n"
+            f"👤 <b>ФИО:</b> {req.full_name}\n"
             f"📞 <b>Телефон:</b> {req.phone}\n"
             f"🏢 <b>Место работы:</b> {req.workplace}\n"
             f"💼 <b>Должность:</b> {req.position}\n"
-            f"Статус: {req.status}\n"
-            f"Одобрил: {admin_name}\n"
+            f"👥 <b>Username:</b> {req.username if req.username else '—'}\n"
+            f"📅 <b>Дата создания:</b> {req.created_at}\n"
+            f"📅 <b>Дата одобрения:</b> {req.approved_at}\n"
+            f"👤 <b>Одобрил:</b> {admin_name}\n"
+            f"✅ <b>Правила приняты:</b> {req.rules_accepted_at or '—'}\n"
         )
         if edit:
-            await message.edit_text(text, reply_markup=kb.as_markup())
+            await message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         else:
-            await message.answer(text, reply_markup=kb.as_markup())
+            await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
     @dp.callback_query(F.data == "next_approved")
     async def next_approved_cb(callback: CallbackQuery, state: FSMContext):
@@ -994,18 +1024,20 @@ async def main():
         text = (
             f"❌ <b>Отклоненная заявка</b> #{req.id}\n\n"
             f"📝 <b>Тип:</b> {'С (свои)' if req.person_type=='self' else 'ТП (третье лицо)'}\n"
-            f"👤 <b>ФИО:</b>{req.full_name}\n"
+            f"👤 <b>ФИО:</b> {req.full_name}\n"
             f"📞 <b>Телефон:</b> {req.phone}\n"
             f"🏢 <b>Место работы:</b> {req.workplace}\n"
             f"💼 <b>Должность:</b> {req.position}\n"
-            f"Статус: {req.status}\n"
-            f"Отклонил: {admin_name}\n"
-            f"Причина отказа: {req.rejection_reason or '—'}\n"
+            f"👥 <b>Username:</b> {req.username if req.username else '—'}\n"
+            f"📅 <b>Дата создания:</b> {req.created_at}\n"
+            f"📅 <b>Дата отклонения:</b> {req.rejected_at}\n"
+            f"👤 <b>Отклонил:</b> {admin_name}\n"
+            f"❌ <b>Причина отказа:</b> {req.rejection_reason or '—'}\n"
         )
         if edit:
-            await message.edit_text(text, reply_markup=kb.as_markup())
+            await message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         else:
-            await message.answer(text, reply_markup=kb.as_markup())
+            await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
     @dp.callback_query(F.data == "next_rejected")
     async def next_rejected_cb(callback: CallbackQuery, state: FSMContext):
@@ -1025,8 +1057,9 @@ async def main():
 
     # ---- Одобрить заявку (approve_) ----
     @dp.callback_query(F.data.startswith("approve_"))
-    async def approve_request(callback: CallbackQuery):
+    async def approve_request(callback: CallbackQuery, state: FSMContext):
         admin_id = callback.from_user.id
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         with get_db() as db:
             # Ищем админа, который нажал на кнопку
@@ -1042,6 +1075,7 @@ async def main():
             # Помечаем заявку одобренной
             req.status = "approved"
             req.approved_by = admin_id
+            req.approved_at = current_time
 
             # Генерируем код для третьего лица, если нужно
             if req.person_type == "third_party" and req.username:
@@ -1049,18 +1083,11 @@ async def main():
 
             db.commit()
 
-        # Уведомим остальных админов, используя имя, а не id
-        with get_db() as db:
-            all_adms = db.query(AdminUser).all()
-            for a in all_adms:
-                if a.telegram_id != admin_id:
-                    try:
-                        await callback.message.bot.send_message(
-                            chat_id=a.telegram_id,
-                            text=f"Заявка #{req_id} одобрена админом {admin_name}."
-                        )
-                    except:
-                        pass
+        # Уведомление админу об успешном одобрении
+        await callback.message.bot.send_message(
+            chat_id=admin_id,
+            text=f"✅ Заявка #{req_id} успешно одобрена и правила отправлены пользователю."
+        )
 
         # далее отправка правил
         with get_db() as db:
@@ -1080,6 +1107,7 @@ async def main():
                  "🎉 <b>Ваша заявка одобрена!</b>\n\n"
                  "📋 <b>Правила группы:</b>\n"
                   f"<pre>{rules_text}</pre>\n\n"
+                "✅ <b>Что бы принять или отклонить правила, отправьте команды боту @hrclubrtbot:</b>\n"
                 "✅ <b>Принять правила:</b>\n"
                  f"Отправьте команду:  <code>/accept {code}</code>\n\n"
                  "❌ <b>Отклонить правила:</b>\n"
@@ -1108,6 +1136,12 @@ async def main():
             kb.adjust(2)
 
             try:
+                # Для обычных пользователей (self):
+                link = await callback.message.bot.create_chat_invite_link(
+                    PRIVATE_GROUP_ID,
+                    member_limit=1  # Ограничение на 1 использование
+                )
+
                 await callback.message.bot.send_message(
                     chat_id=c_id,
                     text=rules_text_formatted,
@@ -1117,6 +1151,22 @@ async def main():
             except Exception as e:
                 logging.error(f"Ошибка при отправке правил пользователю {c_id}: {e}")
                 await callback.answer("Ошибка при отправке правил пользователю.", show_alert=True)
+
+        # После обработки заявки удаляем её из списка pending
+        data = await state.get_data()
+        if data.get("pending_ids"):
+            pending_ids = data["pending_ids"]
+            if req_id in pending_ids:
+                pending_ids.remove(req_id)
+                current_index = data.get("current_index", 0)
+                if current_index >= len(pending_ids):
+                    current_index = max(0, len(pending_ids) - 1)
+                await state.update_data(pending_ids=pending_ids, current_index=current_index)
+                
+                if pending_ids:
+                    await show_request_to_admin(callback.message, state)
+                else:
+                    await callback.message.edit_text("Все заявки обработаны.")
 
     # ---- Отклонить заявку (reject_) ----
     @dp.callback_query(F.data.startswith("reject_"))
@@ -1173,7 +1223,7 @@ async def main():
                 text=(
                     "❌ <b>Ваша заявка отклонена.</b>\n\n"
                     f"📝 <b>Причина:</b> <i>{reason}</i>\n\n"
-                    "🔄 <b>Что делать дальше?</b>\n"
+                    "�� <b>Что делать дальше?</b>\n"
                     "Вы можете подать новую заявку, исправив указанные ошибки.\n"
                     "Для этого используйте команду /new."
                 ),
@@ -1219,10 +1269,32 @@ async def main():
     async def accept_rules_bot(callback: CallbackQuery):
         req_id = int(callback.data.split("_")[2])
         try:
+            # Для обычных пользователей (self):
             link = await callback.message.bot.create_chat_invite_link(
                 PRIVATE_GROUP_ID,
-                member_limit=1
+                member_limit=1  # Ограничение на 1 использование
             )
+            
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Сохраняем дату принятия правил и уведомляем админов
+            with get_db() as db:
+                req = db.get(UserRequest, req_id)
+                if req:
+                    req.rules_accepted_at = current_time
+                    db.commit()
+                    
+                    # Уведомляем админов
+                    admins = db.query(AdminUser).all()
+                    for admin in admins:
+                        try:
+                            await callback.message.bot.send_message(
+                                chat_id=admin.telegram_id,
+                                text=f"✅ Пользователь {req.full_name} (заявка #{req_id}) принял правила и получил ссылку на группу.\n📅 Дата: {current_time}"
+                            )
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки уведомления админу {admin.telegram_id}: {e}")
+
             await callback.message.edit_text(
                 text=(
                     "Вы приняли правила!\n\n"
@@ -1264,15 +1336,38 @@ async def main():
                 await message.answer("Заявка не в статусе 'approved'.")
                 return
 
-            # Генерируем ссылку
             try:
-                link = await message.bot.create_chat_invite_link(PRIVATE_GROUP_ID, member_limit=1)
+                # Для третьих лиц:
+                link = await message.bot.create_chat_invite_link(
+                    PRIVATE_GROUP_ID, 
+                    member_limit=1  # Ограничение на 1 использование
+                )
+                
+                # Сохраняем дату принятия правил
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                req.rules_accepted_at = current_time
+                db.commit()
+
+                # Уведомляем админов
+                admins = db.query(AdminUser).all()
+                for admin in admins:
+                    try:
+                        await message.bot.send_message(
+                            chat_id=admin.telegram_id,
+                            text=f"✅ Пользователь {req.full_name} (заявка #{req_id}) принял правила и получил ссылку на группу.\n📅 Дата: {current_time}"
+                        )
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки уведомления админу {admin.telegram_id}: {e}")
+
                 await message.answer(
                     "Спасибо! Вы приняли правила.\n\n"
                     f"Ссылка для вступления в группу: {link.invite_link}"
                 )
+                
+                # Очищаем код после использования
                 req.confirmation_code = None
                 db.commit()
+
             except Exception as e:
                 logging.error(f"Ошибка при создании ссылки: {e}")
                 await message.answer("Ошибка при создании ссылки.")
