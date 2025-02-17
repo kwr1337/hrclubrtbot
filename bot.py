@@ -4,7 +4,7 @@ import os
 import re
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
@@ -35,8 +35,8 @@ from telethon import TelegramClient
 
 
 BOT_TOKEN = "1282162158:AAHDrDTUAvDecZ-UehaoFdG6MkHxaKH1wvQ"
-ROOT_ADMIN_ID = 608167496  # главный админ
-PRIVATE_GROUP_ID = -1002306345871
+ROOT_ADMIN_ID = 137169162  # главный админ
+PRIVATE_GROUP_ID = -1001363051229
 
 TELETHON_API_ID = "24732270"
 TELETHON_API_HASH = "0e4e8581f1256800d859f7e9490b69d6"
@@ -145,12 +145,15 @@ class DeleteAdminFSM(StatesGroup):
 # УСТАНОВКА КОМАНД
 # -------------------------------------------------------
 async def set_bot_commands(bot: Bot):
-    # --- Команды для обычных пользователей ---
+    # --- Команды для обычных пользователей (в личных сообщениях) ---
     user_commands = [
         BotCommand(command="new", description="Создать новую заявку"),
         BotCommand(command="start", description="Начать работу"),
     ]
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+
+    # --- Убираем все команды из групп ---
+    await bot.set_my_commands([], scope=BotCommandScopeChat(chat_id=PRIVATE_GROUP_ID))
 
     with get_db() as db:
         all_admins = db.query(AdminUser).all()
@@ -235,14 +238,72 @@ async def authorize_user():
 # -------------------------------------------------------
 # ГЛАВНАЯ ЛОГИКА
 # -------------------------------------------------------
+async def check_pending_requests(bot: Bot):
+    while True:
+        # Ждем до 9:00 следующего рабочего дня
+        now = datetime.now()
+        next_run = now.replace(hour=2, minute=40, second=0, microsecond=0)
+        if now >= next_run:
+            next_run = next_run.replace(day=next_run.day + 1)
+        
+        # Пропускаем выходные
+        while next_run.weekday() in [5, 6]:  # 5=суббота, 6=воскресенье
+            next_run = next_run.replace(day=next_run.day + 1)
+        
+        delay = (next_run - now).total_seconds()
+        await asyncio.sleep(delay)
+        
+        # Проверяем заявки
+        with get_db() as db:
+            # Получаем все pending заявки
+            pending_requests = db.query(UserRequest).filter_by(status="pending").all()
+            day_ago = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            
+            old_requests = [req for req in pending_requests 
+                          if req.created_at and req.created_at <= day_ago]
+            
+            if old_requests:
+                # Получаем список админов
+                admins = db.query(AdminUser).all()
+                
+                # Формируем текст уведомления
+                notification = (
+                    "⚠️ <b>Напоминание о необработанных заявках</b>\n\n"
+                    "Следующие заявки ожидают рассмотрения более 24 часов:\n\n"
+                )
+                
+                for req in old_requests:
+                    notification += (
+                        f"• Заявка #{req.id} от {req.created_at}\n"
+                        f"  ФИО: {req.full_name}\n"
+                        f"  Тип: {'Своя' if req.person_type == 'self' else 'Третье лицо'}\n\n"
+                    )
+                
+                notification += "Используйте /check для просмотра заявок."
+                
+                # Отправляем уведомление каждому админу
+                for admin in admins:
+                    try:
+                        await bot.send_message(
+                            chat_id=admin.telegram_id,
+                            text=notification,
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки напоминания админу {admin.telegram_id}: {e}")
+
 async def main():
     logging.basicConfig(level=logging.INFO)
     await authorize_user()
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())
-
-    # await set_bot_commands(bot)
+    
+    # Устанавливаем команды
+    await set_bot_commands(bot)
+    
+    # Запускаем проверку pending заявок в отдельной таске
+    asyncio.create_task(check_pending_requests(bot))
 
     # Функция проверки, является ли пользователь админом
     def check_is_admin(user_id: int) -> bool:
@@ -289,9 +350,8 @@ async def main():
 
         await message.answer(text, reply_markup=kb.as_markup())
 
-    # ---------------------
-    # Пользовательские команды (заявки)
-    # ---------------------
+
+    # Применяем декоратор к командам
     @dp.message(Command("start"))
     async def cmd_start(message: Message, state: FSMContext):
         await state.clear()
@@ -465,6 +525,12 @@ async def main():
         data = await state.get_data()
         try:
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Получаем username пользователя или ставим прочерк
+            username = "—"
+            if data["person_type"] == "self":
+                username = callback.from_user.username or "—"
+            
             with get_db() as db:
                 new_req = UserRequest(
                     chat_id=callback.from_user.id,
@@ -472,8 +538,8 @@ async def main():
                     full_name=data["full_name"],
                     phone=data["phone"],
                     workplace=data["workplace"],
-                    position=data.get("position"),  # <--- теперь добавляем при сохранении
-                    username=data.get("username"),
+                    position=data.get("position"),
+                    username=username if data["person_type"] == "self" else data.get("username"),
                     status="pending",
                     created_at=current_time
                 )
@@ -517,7 +583,7 @@ async def main():
                     f"📞 <b>Телефон:</b> <code>{data['phone']}</code>\n"
                     f"🏢 <b>Место работы:</b> {data['workplace']}\n"
                     f"💼 <b>Должность:</b> {data['position']}\n"
-                    f"👥 <b>Username:</b> {data.get('username', '—')}\n\n"
+                    f"�� <b>Username:</b> {callback.from_user.username or '—' if data['person_type'] == 'self' else data.get('username', '—')}\n\n"
                     "⏳ <i>Ожидайте решения администратора.</i>"
                 ),
                 parse_mode="HTML"
@@ -1106,7 +1172,7 @@ async def main():
             text_for_third = (
                  "🎉 <b>Ваша заявка одобрена!</b>\n\n"
                  "📋 <b>Правила группы:</b>\n"
-                  f"<pre>{rules_text}</pre>\n\n"
+                  f"  <b>{rules_text}</b>\n\n"
                 "✅ <b>Что бы принять или отклонить правила, отправьте команды боту @hrclubrtbot:</b>\n"
                 "✅ <b>Принять правила:</b>\n"
                  f"Отправьте команду:  <code>/accept {code}</code>\n\n"
@@ -1128,7 +1194,7 @@ async def main():
             rules_text_formatted = (
                 "🎉 <b>Ваша заявка одобрена!</b>\n\n"
                 "📋 <b>Правила группы:</b>\n"
-                f"<pre>{rules_text}</pre>\n\n"
+                f"   <b>{rules_text}</b>\n\n"
             )
             kb = InlineKeyboardBuilder()
             kb.button(text="✅ Принять", callback_data=f"accept_rules_{req_id}")
@@ -1395,6 +1461,38 @@ async def main():
 
         await message.answer("Вы отклонили правила. Доступ в группу не предоставлен.")
 
+    # ---- Обработчик входа пользователя в группу ----
+    @dp.message(F.new_chat_members)
+    async def on_user_join(message: Message):
+        for new_member in message.new_chat_members:
+            with get_db() as db:
+                # Ищем самую последнюю заявку от этого пользователя
+                req = db.query(UserRequest).filter_by(
+                    chat_id=new_member.id
+                ).order_by(
+                    UserRequest.id.desc()  # сортируем по id в обратном порядке
+                ).first()  # берем первую (самую новую)
+                
+                if req:
+                    await message.answer(
+                        f"👋 Добро пожаловать, {req.full_name}!\n"
+                        f"🏢 Место работы: {req.workplace}\n"
+                        f"💼 Должность: {req.position}\n"
+                    )
+
+    # ---- Контроль времени сообщений в группе ----
+    @dp.message(F.chat.type.in_({"group", "supergroup"}))
+    async def check_message_time(message: Message):
+        now = datetime.now()       
+        is_weekday = now.weekday() < 5
+        is_work_hours = 8 <= now.hour < 20
+        if not is_weekday or not is_work_hours:
+            await message.reply(
+                "Согласно правилам группы - писать только с 8 до 20 часов в будние дни"
+            )
+
+
+
     # ---- Запуск бота ----
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
@@ -1402,3 +1500,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
