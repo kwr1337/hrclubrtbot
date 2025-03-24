@@ -51,7 +51,6 @@ telethon_client = TelegramClient(TELETHON_SESSION, TELETHON_API_ID, TELETHON_API
 
 @contextmanager
 def get_db():
-    """Контекстный менеджер для работы с сессией SQLAlchemy."""
     db = SessionLocal()
     try:
         yield db
