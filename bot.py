@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import asyncio
 import logging
 import os
@@ -58,17 +61,12 @@ def get_db():
         db.close()
 
 
-# Добавим функцию проверки рабочего времени (добавьте в начало файла, после импортов)
 def is_work_time():
     now = datetime.now()
-    is_weekday = now.weekday() < 5  # 0-4 это пн-пт
+    is_weekday = now.weekday() < 5 
     is_work_hours = 8 <= now.hour < 20
     return is_weekday and is_work_hours
 
-
-# -------------------------------------------------------
-# МОДЕЛИ БД
-# -------------------------------------------------------
 class AdminUser(Base):
     __tablename__ = "admin_users"
 
@@ -99,10 +97,10 @@ class UserRequest(Base):
     status = Column(String, default="pending")
     rejection_reason = Column(String, nullable=True)
     confirmation_code = Column(String, nullable=True)
-    created_at = Column(String, nullable=True)  # Дата создания
-    approved_at = Column(String, nullable=True)  # Дата одобрения
-    rejected_at = Column(String, nullable=True)  # Дата отклонения
-    rules_accepted_at = Column(String, nullable=True)  # Дата принятия правил
+    created_at = Column(String, nullable=True)  
+    approved_at = Column(String, nullable=True)  
+    rejected_at = Column(String, nullable=True) 
+    rules_accepted_at = Column(String, nullable=True)  
 
     approved_by = Column(Integer, nullable=True)
     rejected_by = Column(Integer, nullable=True)
@@ -112,30 +110,27 @@ class PendingInvite(Base):
     __tablename__ = "pending_invites"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    request_id = Column(Integer, nullable=False)  # ID заявки
-    chat_id = Column(Integer, nullable=False)     # ID чата для отправки
-    created_at = Column(String, nullable=False)   # Когда создан запрос
-    is_third_party = Column(Integer, default=0)   # Флаг третьего лица
-    confirmation_code = Column(String, nullable=True)  # Код для third_party
+    request_id = Column(Integer, nullable=False)  
+    chat_id = Column(Integer, nullable=False)     
+    created_at = Column(String, nullable=False)   
+    is_third_party = Column(Integer, default=0)   
+    confirmation_code = Column(String, nullable=True)  
 
 
-# Добавляем новую модель для хранения отложенных уведомлений о входе
+
 class PendingJoinNotification(Base):
     __tablename__ = "pending_join_notifications"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, nullable=False)  # ID пользователя, который вошел
-    chat_id = Column(Integer, nullable=False)  # ID группы
-    full_name = Column(String, nullable=True)  # Имя пользователя
-    workplace = Column(String, nullable=True)  # Место работы
-    position = Column(String, nullable=True)   # Должность
-    created_at = Column(String, nullable=False)  # Когда пользователь вошел
+    user_id = Column(Integer, nullable=False)  
+    chat_id = Column(Integer, nullable=False)  
+    full_name = Column(String, nullable=True) 
+    workplace = Column(String, nullable=True)  
+    position = Column(String, nullable=True)   
+    created_at = Column(String, nullable=False)  
 
-
-# Base.metadata.drop_all(engine)
 Base.metadata.create_all(engine)
 
-# Добавляем root админа
 with get_db() as db:
     root_admin = db.query(AdminUser).filter_by(telegram_id=ROOT_ADMIN_ID).first()
     if not root_admin:
@@ -145,9 +140,6 @@ with get_db() as db:
         logging.info(f"Added root admin with ID {ROOT_ADMIN_ID}")
 
 
-# -------------------------------------------------------
-# СОСТОЯНИЯ (FSM)
-# -------------------------------------------------------
 class RequestFSM(StatesGroup):
     Choice = State()
     FullName = State()
