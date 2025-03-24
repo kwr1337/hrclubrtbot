@@ -35,7 +35,7 @@ from telethon import TelegramClient
 
 
 BOT_TOKEN = "1282162158:AAHDrDTUAvDecZ-UehaoFdG6MkHxaKH1wvQ"
-ROOT_ADMIN_ID = 137169162  # главный админ
+ROOT_ADMIN_ID = 137169162 
 PRIVATE_GROUP_ID = -1001363051229
 
 TELETHON_API_ID = "24732270"
@@ -57,6 +57,14 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# Добавим функцию проверки рабочего времени (добавьте в начало файла, после импортов)
+def is_work_time():
+    now = datetime.now()
+    is_weekday = now.weekday() < 5  # 0-4 это пн-пт
+    is_work_hours = 8 <= now.hour < 20
+    return is_weekday and is_work_hours
 
 
 # -------------------------------------------------------
@@ -101,8 +109,32 @@ class UserRequest(Base):
     rejected_by = Column(Integer, nullable=True)
 
 
+class PendingInvite(Base):
+    __tablename__ = "pending_invites"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    request_id = Column(Integer, nullable=False)  # ID заявки
+    chat_id = Column(Integer, nullable=False)     # ID чата для отправки
+    created_at = Column(String, nullable=False)   # Когда создан запрос
+    is_third_party = Column(Integer, default=0)   # Флаг третьего лица
+    confirmation_code = Column(String, nullable=True)  # Код для third_party
+
+
+# Добавляем новую модель для хранения отложенных уведомлений о входе
+class PendingJoinNotification(Base):
+    __tablename__ = "pending_join_notifications"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False)  # ID пользователя, который вошел
+    chat_id = Column(Integer, nullable=False)  # ID группы
+    full_name = Column(String, nullable=True)  # Имя пользователя
+    workplace = Column(String, nullable=True)  # Место работы
+    position = Column(String, nullable=True)   # Должность
+    created_at = Column(String, nullable=False)  # Когда пользователь вошел
+
+
 # Base.metadata.drop_all(engine)
-# Base.metadata.create_all(engine)
+Base.metadata.create_all(engine)
 
 # Добавляем root админа
 with get_db() as db:
@@ -292,6 +324,95 @@ async def check_pending_requests(bot: Bot):
                     except Exception as e:
                         logging.error(f"Ошибка отправки напоминания админу {admin.telegram_id}: {e}")
 
+async def check_pending_invites(bot: Bot):
+    while True:
+        # Проверяем каждые 5 минут
+        await asyncio.sleep(300)
+        
+        # Если не рабочее время, пропускаем проверку
+        if not is_work_time():
+            continue
+            
+        with get_db() as db:
+            pending_invites = db.query(PendingInvite).all()
+            
+            for invite in pending_invites:
+                try:
+                    # Создаем ссылку-приглашение
+                    link = await bot.create_chat_invite_link(
+                        PRIVATE_GROUP_ID,
+                        member_limit=1
+                    )
+                    
+                    # Получаем данные заявки
+                    req = db.query(UserRequest).filter_by(id=invite.request_id).first()
+                    if not req:
+                        # Если заявка не найдена, удаляем отложенное приглашение
+                        db.delete(invite)
+                        db.commit()
+                        continue
+                    
+                    # Отправляем ссылку
+                    await bot.send_message(
+                        chat_id=invite.chat_id,
+                        text=(
+                            "🎉 <b>Добрый день!</b>\n\n"
+                            "Вы ранее приняли правила группы в нерабочее время.\n"
+                            f"Вот ваша ссылка для вступления в группу: {link.invite_link}"
+                        ),
+                        parse_mode="HTML"
+                    )
+                    
+                    # Уведомляем админов
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    admins = db.query(AdminUser).all()
+                    for admin in admins:
+                        try:
+                            await bot.send_message(
+                                chat_id=admin.telegram_id,
+                                text=f"✅ Пользователь {req.full_name} (заявка #{req.id}) получил отложенную ссылку на группу.\n📅 Дата: {current_time}"
+                            )
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки уведомления админу {admin.telegram_id}: {e}")
+                    
+                    # Удаляем запись из отложенных
+                    db.delete(invite)
+                    db.commit()
+                    
+                except Exception as e:
+                    logging.error(f"Ошибка при отправке отложенной ссылки: {e}")
+
+async def check_pending_join_notifications(bot: Bot):
+    while True:
+        # Проверяем каждые 5 минут
+        await asyncio.sleep(300)
+        
+        # Если не рабочее время, пропускаем проверку
+        if not is_work_time():
+            continue
+            
+        with get_db() as db:
+            pending_notifications = db.query(PendingJoinNotification).all()
+            
+            for notification in pending_notifications:
+                try:
+                    # Отправляем уведомление в группу
+                    await bot.send_message(
+                        chat_id=notification.chat_id,
+                        text=(
+                            f"👋 Добро пожаловать, {notification.full_name}!\n"
+                            f"🏢 Место работы: {notification.workplace}\n"
+                            f"💼 Должность: {notification.position}\n"
+                        )
+                    )
+                    
+                    # Удаляем запись из отложенных
+                    db.delete(notification)
+                    db.commit()
+                    
+                except Exception as e:
+                    logging.error(f"Ошибка при отправке отложенного уведомления о входе: {e}")
+
 async def main():
     logging.basicConfig(level=logging.INFO)
     await authorize_user()
@@ -304,6 +425,12 @@ async def main():
     
     # Запускаем проверку pending заявок в отдельной таске
     asyncio.create_task(check_pending_requests(bot))
+    
+    # Запускаем проверку отложенных ссылок в отдельной таске
+    asyncio.create_task(check_pending_invites(bot))
+    
+    # Запускаем проверку отложенных уведомлений о входе в отдельной таске
+    asyncio.create_task(check_pending_join_notifications(bot))
 
     # Функция проверки, является ли пользователь админом
     def check_is_admin(user_id: int) -> bool:
@@ -583,7 +710,7 @@ async def main():
                     f"📞 <b>Телефон:</b> <code>{data['phone']}</code>\n"
                     f"🏢 <b>Место работы:</b> {data['workplace']}\n"
                     f"💼 <b>Должность:</b> {data['position']}\n"
-                    f"�� <b>Username:</b> {callback.from_user.username or '—' if data['person_type'] == 'self' else data.get('username', '—')}\n\n"
+                    f"👥 <b>Username:</b> {callback.from_user.username or '—' if data['person_type'] == 'self' else data.get('username', '—')}\n\n"
                     "⏳ <i>Ожидайте решения администратора.</i>"
                 ),
                 parse_mode="HTML"
@@ -1334,6 +1461,34 @@ async def main():
     @dp.callback_query(F.data.startswith("accept_rules_"))
     async def accept_rules_bot(callback: CallbackQuery):
         req_id = int(callback.data.split("_")[2])
+        
+        # Проверяем, рабочее ли сейчас время
+        if not is_work_time():
+            # Сохраняем дату принятия правил
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with get_db() as db:
+                req = db.get(UserRequest, req_id)
+                if req:
+                    req.rules_accepted_at = current_time
+                    
+                    # Создаем запись для отложенной отправки
+                    new_pending = PendingInvite(
+                        request_id=req_id,
+                        chat_id=callback.from_user.id,
+                        created_at=current_time,
+                        is_third_party=0
+                    )
+                    db.add(new_pending)
+                    db.commit()
+            
+            await callback.message.edit_text(
+                "Вы приняли правила!\n\n"
+                "⚠️ Ссылка на беседу будет отправлена автоматически в рабочее время (с 8:00 до 20:00 в будние дни)."
+            )
+            await callback.answer()
+            return
+        
+        # Остальной код остается без изменений
         try:
             # Для обычных пользователей (self):
             link = await callback.message.bot.create_chat_invite_link(
@@ -1393,6 +1548,7 @@ async def main():
             await message.answer("Использование: /accept <код>")
             return
         code = parts[1]
+        
         with get_db() as db:
             req = db.query(UserRequest).filter_by(confirmation_code=code).first()
             if not req:
@@ -1401,7 +1557,34 @@ async def main():
             if req.status != "approved":
                 await message.answer("Заявка не в статусе 'approved'.")
                 return
-
+        
+        # Проверяем, рабочее ли сейчас время
+        if not is_work_time():
+            # Сохраняем дату принятия правил
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with get_db() as db:
+                req = db.query(UserRequest).filter_by(confirmation_code=code).first()
+                req.rules_accepted_at = current_time
+                
+                # Создаем запись для отложенной отправки
+                new_pending = PendingInvite(
+                    request_id=req.id,
+                    chat_id=message.from_user.id,
+                    created_at=current_time,
+                    is_third_party=1,
+                    confirmation_code=code
+                )
+                db.add(new_pending)
+                db.commit()
+            
+            await message.answer(
+                "Спасибо! Вы приняли правила.\n\n"
+                "⚠️ Ссылка на беседу будет отправлена автоматически в рабочее время (с 8:00 до 20:00 в будние дни)."
+            )
+            return
+        
+        # Остальной код остается без изменений
+        with get_db() as db:
             try:
                 # Для третьих лиц:
                 link = await message.bot.create_chat_invite_link(
@@ -1420,7 +1603,7 @@ async def main():
                     try:
                         await message.bot.send_message(
                             chat_id=admin.telegram_id,
-                            text=f"✅ Пользователь {req.full_name} (заявка #{req_id}) принял правила и получил ссылку на группу.\n📅 Дата: {current_time}"
+                            text=f"✅ Пользователь {req.full_name} (заявка #{req.id}) принял правила и получил ссылку на группу.\n📅 Дата: {current_time}"
                         )
                     except Exception as e:
                         logging.error(f"Ошибка отправки уведомления админу {admin.telegram_id}: {e}")
@@ -1474,11 +1657,26 @@ async def main():
                 ).first()  # берем первую (самую новую)
                 
                 if req:
-                    await message.answer(
-                        f"👋 Добро пожаловать, {req.full_name}!\n"
-                        f"🏢 Место работы: {req.workplace}\n"
-                        f"💼 Должность: {req.position}\n"
-                    )
+                    # Проверяем, рабочее ли сейчас время
+                    if not is_work_time():
+                        # Сохраняем информацию для отложенной отправки
+                        new_notification = PendingJoinNotification(
+                            user_id=new_member.id,
+                            chat_id=message.chat.id,
+                            full_name=req.full_name,
+                            workplace=req.workplace,
+                            position=req.position,
+                            created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        )
+                        db.add(new_notification)
+                        db.commit()
+                    else:
+                        # Если рабочее время, отправляем сразу
+                        await message.answer(
+                            f"👋 Добро пожаловать, {req.full_name}!\n"
+                            f"🏢 Место работы: {req.workplace}\n"
+                            f"💼 Должность: {req.position}\n"
+                        )
 
     # ---- Контроль времени сообщений в группе ----
     @dp.message(F.chat.type.in_({"group", "supergroup"}))
