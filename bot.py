@@ -37,9 +37,13 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from telethon import TelegramClient
 
 
-BOT_TOKEN = "1282162158:AAHDrDTUAvDecZ-UehaoFdG6MkHxaKH1wvQ"
-ROOT_ADMIN_ID = 137169162 
-PRIVATE_GROUP_ID = -1001363051229
+BOT_TOKEN = "7871917717:AAGfHtOCP8rRmsKymmoMXoR4pX2z1VWNbos"
+ROOT_ADMIN_ID = 6500936622 
+PRIVATE_GROUP_ID = -1002296549569
+
+# BOT_TOKEN = "1282162158:AAHDrDTUAvDecZ-UehaoFdG6MkHxaKH1wvQ"
+# ROOT_ADMIN_ID = 137169162 
+# PRIVATE_GROUP_ID = -1001363051229
 
 TELETHON_API_ID = "24732270"
 TELETHON_API_HASH = "0e4e8581f1256800d859f7e9490b69d6"
@@ -481,6 +485,8 @@ async def main():
     @dp.message(Command("new"))
     async def cmd_new(message: Message, state: FSMContext):
         await state.clear()
+        
+        # Сначала всегда показываем кнопки выбора типа заявки без предварительных проверок
         kb = InlineKeyboardBuilder()
         kb.button(text="С (Свои данные)", callback_data="person_self")
         kb.button(text="ТП (Третье лицо)", callback_data="person_third")
@@ -491,6 +497,42 @@ async def main():
     @dp.callback_query(F.data.in_({"person_self", "person_third"}), RequestFSM.Choice)
     async def person_choice(callback: CallbackQuery, state: FSMContext):
         p_type = "self" if callback.data == "person_self" else "third_party"
+        
+        # Если выбран тип "за себя", проверяем наличие существующей активной заявки
+        if p_type == "self":
+            # Первым делом проверяем, находится ли пользователь уже в группе
+            try:
+                # Проверяем, находится ли пользователь уже в группе
+                chat_member = await callback.message.bot.get_chat_member(PRIVATE_GROUP_ID, callback.from_user.id)
+                if chat_member and chat_member.status not in ["left", "kicked", "banned"]:
+                    await callback.message.edit_text(
+                        "⚠️ Вы уже являетесь участником группы. Создание новой заявки не требуется."
+                    )
+                    await callback.answer()
+                    await state.clear()
+                    return
+            except Exception as e:
+                # В случае ошибки (например, пользователь не найден) продолжаем стандартный процесс
+                logging.error(f"Ошибка при проверке членства в группе: {e}")
+            
+            # Затем проверяем наличие активной заявки
+            with get_db() as db:
+                existing_self_request = db.query(UserRequest).filter(
+                    UserRequest.chat_id == callback.from_user.id,
+                    UserRequest.person_type == "self",
+                    UserRequest.status.in_(["pending", "approved"])
+                ).first()
+                
+                if existing_self_request:
+                    status_text = "рассматривается" if existing_self_request.status == "pending" else "одобрена"
+                    await callback.message.edit_text(
+                        f"⚠️ У вас уже есть активная заявка #{existing_self_request.id} (статус: {status_text}).\n"
+                        f"Вы не можете создать ещё одну заявку на себя."
+                    )
+                    await callback.answer()
+                    await state.clear()
+                    return
+        
         await state.update_data(person_type=p_type)
         await state.set_state(RequestFSM.FullName)
         await callback.message.edit_text(
@@ -524,6 +566,26 @@ async def main():
 
         data = await state.get_data()
         is_editing = data.get("editing", False)
+        
+        # Проверка существующих заявок по имени только для "self", для "third_party" проверка по username
+        if not is_editing and data.get("person_type") == "self":
+            with get_db() as db:
+                existing_self_request = db.query(UserRequest).filter(
+                    UserRequest.full_name == fio,
+                    UserRequest.person_type == "self",
+                    UserRequest.status.in_(["pending", "approved"])
+                ).first()
+                
+                if existing_self_request:
+                    status_text = "рассматривается" if existing_self_request.status == "pending" else "одобрена"
+                    await message.answer(
+                        f"⚠️ На имя {fio} уже существует активная заявка #{existing_self_request.id} (статус: {status_text}).\n"
+                        "Пожалуйста, дождитесь рассмотрения существующей заявки или укажите другие данные."
+                    )
+                    # Очищаем состояние, чтобы прекратить процесс создания заявки
+                    await state.clear()
+                    return
+    
         await state.update_data(full_name=fio)
 
         if is_editing:
@@ -627,6 +689,63 @@ async def main():
         data = await state.get_data()
         is_editing = data.get("editing", False)
         usern = message.text.strip()
+        
+        # Проверяем наличие символа @ в начале username
+        if usern and not usern.startswith('@'):
+            usern = '@' + usern
+        
+        # Если это не редактирование, выполняем проверки
+        if not is_editing:
+            # 1. Проверка существующих заявок с таким же username
+            with get_db() as db:
+                existing_username_request = db.query(UserRequest).filter(
+                    UserRequest.username == usern,
+                    UserRequest.status.in_(["pending", "approved"])
+                ).first()
+                
+                if existing_username_request:
+                    status_text = "рассматривается" if existing_username_request.status == "pending" else "одобрена"
+                    await message.answer(
+                        f"⚠️ На пользователя {usern} уже существует активная заявка #{existing_username_request.id} (статус: {status_text}).\n"
+                        "Пожалуйста, дождитесь рассмотрения существующей заявки или укажите другие данные."
+                    )
+                    # Очищаем состояние, чтобы прекратить процесс создания заявки
+                    await state.clear()
+                    return
+                
+            # 2. Проверка членства в группе
+            try:
+                # Убираем @ для поиска пользователя
+                clean_username = usern[1:] if usern.startswith('@') else usern
+                
+                # Пробуем получить пользователя через Telethon
+                if not telethon_client.is_connected():
+                    await telethon_client.connect()
+                    
+                # Получаем сущность пользователя по username
+                user_entity = None
+                try:
+                    user_entity = await telethon_client.get_entity(clean_username)
+                except Exception as e:
+                    logging.error(f"Не удалось получить информацию о пользователе {clean_username}: {e}")
+                
+                if user_entity:
+                    # Проверяем, есть ли этот пользователь в группе
+                    try:
+                        chat_member = await message.bot.get_chat_member(PRIVATE_GROUP_ID, user_entity.id)
+                        if chat_member and chat_member.status not in ["left", "kicked", "banned"]:
+                            await message.answer(
+                                f"⚠️ Пользователь {usern} уже является участником группы. "
+                                "Создание заявки для него не требуется."
+                            )
+                            # Очищаем состояние, чтобы прекратить процесс создания заявки
+                            await state.clear()
+                            return
+                    except Exception as e:
+                        logging.error(f"Ошибка при проверке членства в группе: {e}")
+            except Exception as e:
+                logging.error(f"Ошибка при проверке пользователя {usern}: {e}")
+        
         await state.update_data(username=usern)
 
         if is_editing:
