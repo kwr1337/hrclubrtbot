@@ -35,11 +35,17 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from telethon import TelegramClient
+from sqlalchemy.exc import OperationalError          # ← новый импорт
 
 
 BOT_TOKEN = "1282162158:AAHDrDTUAvDecZ-UehaoFdG6MkHxaKH1wvQ"
 ROOT_ADMIN_ID = 137169162 
 PRIVATE_GROUP_ID = -1001363051229
+
+# BOT_TOKEN = "7871917717:AAGfHtOCP8rRmsKymmoMXoR4pX2z1VWNbos"
+# ROOT_ADMIN_ID = 6500936622 
+# PRIVATE_GROUP_ID = -1002296549569
+
 
 TELETHON_API_ID = "24732270"
 TELETHON_API_HASH = "0e4e8581f1256800d859f7e9490b69d6"
@@ -59,6 +65,22 @@ def get_db():
         yield db
     finally:
         db.close()
+
+@contextmanager
+def safe_commit(db):
+    """
+    Оборачивает db.commit(); при OperationalError делает rollback
+    и логирует через logging.exception — notiBot сам поймает лог.
+    """
+    try:
+        yield
+        db.commit()
+    except OperationalError as e:
+        db.rollback()
+        if "database or disk is full" in str(e).lower():
+            logging.exception("❌ SQLite: диск переполнен — операция откатена")
+        else:
+            logging.exception("❌ SQLite OperationalError")
 
 
 def is_work_time():
@@ -136,7 +158,8 @@ with get_db() as db:
     if not root_admin:
         new_root = AdminUser(telegram_id=ROOT_ADMIN_ID, full_name="Root Admin")
         db.add(new_root)
-        db.commit()
+        with safe_commit(db):
+            pass
         logging.info(f"Added root admin with ID {ROOT_ADMIN_ID}")
 
 
@@ -261,6 +284,9 @@ async def authorize_user():
 # -------------------------------------------------------
 # ГЛАВНАЯ ЛОГИКА
 # -------------------------------------------------------
+
+
+
 async def check_pending_requests(bot: Bot):
     while True:
         # Ждем до 9:00 следующего рабочего дня
@@ -373,6 +399,9 @@ async def check_pending_invites(bot: Bot):
                 except Exception as e:
                     logging.error(f"Ошибка при отправке отложенной ссылки: {e}")
 
+
+
+
 async def check_pending_join_notifications(bot: Bot):
     while True:
         # Проверяем каждые 5 минут
@@ -468,7 +497,6 @@ async def main():
 
         await message.answer(text, reply_markup=kb.as_markup())
 
-
     # Применяем декоратор к командам
     @dp.message(Command("start"))
     async def cmd_start(message: Message, state: FSMContext):
@@ -477,6 +505,7 @@ async def main():
             "Привет! Я бот для заявок.\n\n"
             "Чтобы подать новую заявку, введите /new.\n"
         )
+
 
     @dp.message(Command("new"))
     async def cmd_new(message: Message, state: FSMContext):
@@ -777,7 +806,8 @@ async def main():
                     created_at=current_time
                 )
                 db.add(new_req)
-                db.commit()
+                with safe_commit(db):
+                    pass
 
                 # Уведомление админов с кнопками
                 admins = db.query(AdminUser).all()
@@ -912,7 +942,8 @@ async def main():
                 db.add(rules_obj)
             else:
                 rules_obj.text = new_text
-            db.commit()
+            with safe_commit(db):
+                pass
         await message.answer("Правила группы обновлены.")
         await state.clear()
 
@@ -974,7 +1005,8 @@ async def main():
             else:
                 new_admin = AdminUser(telegram_id=new_tid, full_name=admin_fullname)
                 db.add(new_admin)
-                db.commit()
+                with safe_commit(db):
+                    pass
                 await message.answer(f"Админ {admin_fullname} (id={new_tid}) добавлен.")
         await state.clear()
         await set_bot_commands(bot)
@@ -1512,7 +1544,8 @@ async def main():
                 req.status = "rejected"
                 req.rejection_reason = reason
                 req.rejected_by = admin_id
-                db.commit()
+                with safe_commit(db):
+                    pass
 
                 c_id = req.chat_id
 
@@ -1585,7 +1618,8 @@ async def main():
                         is_third_party=0
                     )
                     db.add(new_pending)
-                    db.commit()
+                    with safe_commit(db):
+                        pass
             
             await callback.message.edit_text(
                 "Вы приняли правила!\n\n"
@@ -1746,7 +1780,8 @@ async def main():
             req.status = "rejected"
             req.rejection_reason = "Третье лицо не приняло правила"
             req.confirmation_code = None
-            db.commit()
+            with safe_commit(db):
+                pass
 
         await message.answer("Вы отклонили правила. Доступ в группу не предоставлен.")
 
@@ -1775,7 +1810,8 @@ async def main():
                             created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         )
                         db.add(new_notification)
-                        db.commit()
+                        with safe_commit(db):
+                            pass
                     else:
                         # Если рабочее время, отправляем сразу
                         await message.answer(
@@ -1801,6 +1837,8 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
+
+   
 
 if __name__ == "__main__":
     asyncio.run(main())
